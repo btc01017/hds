@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hyperliquid Request Weight</title>
+<style>
+:root{color-scheme:dark;--bg:#0b0e11;--card:#13181e;--border:#28313a;--text:#f3f6f8;--muted:#98a4af;--accent:#8dffdf;--bad:#ff9494}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text);padding:24px}
+main{max-width:720px;margin:auto;background:var(--card);border:1px solid var(--border);border-radius:20px;padding:24px}
+h1{margin:0 0 8px;font-size:28px} p{color:var(--muted);line-height:1.45}
+button,input{width:100%;padding:14px;border-radius:12px;border:1px solid var(--border);font-size:16px}
+button{background:#1b222a;color:var(--text);font-weight:700;cursor:pointer}
+button.primary{background:var(--accent);color:#07110e;border:0} button:disabled{opacity:.45;cursor:not-allowed}
+input{background:#0d1217;color:var(--text)}
+.row{margin-top:14px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.box{background:#0d1217;border:1px solid var(--border);border-radius:12px;padding:14px}
+.box small{display:block;color:var(--muted);margin-bottom:5px}.box strong{word-break:break-all}
+.warn{margin-top:16px;border:1px solid #5b4b25;background:#201a0d;color:#f1d88f;padding:12px;border-radius:12px}
+pre{white-space:pre-wrap;word-break:break-word;background:#090c0f;border:1px solid var(--border);border-radius:12px;padding:14px;min-height:90px}
+.ok{color:var(--accent)}.bad{color:var(--bad)}
+@media(max-width:600px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<h1>Hyperliquid Request Weight</h1>
+<p>Подключает MetaMask и отправляет <code>reserveRequestWeight</code>. Приватный ключ страница не запрашивает.</p>
+
+<div class="warn"><b>Сначала тест: 1 request.</b> После успешной подписи можно купить нужное количество.</div>
+
+<div class="row"><button id="connect" class="primary">Подключить MetaMask</button></div>
+
+<div class="grid">
+  <div class="box"><small>Ожидаемый адрес</small><strong>0xD8A73dFF235633089AAB07f124b43a50205b57fC</strong></div>
+  <div class="box"><small>Подключённый адрес</small><strong id="addr">—</strong></div>
+</div>
+
+<div class="row">
+  <small style="color:var(--muted)">Количество requests</small>
+  <input id="weight" type="number" min="1" step="1" value="1">
+</div>
+
+<div class="grid">
+  <div class="box"><small>Ориентировочная стоимость</small><strong id="cost">0.0005 USDC</strong></div>
+  <div class="box"><small>Текущий API-лимит</small><strong id="limit">не загружен</strong></div>
+</div>
+
+<div class="row"><button id="check">Проверить userRateLimit</button></div>
+<div class="row"><button id="reserve" class="primary" disabled>Reserve request weight</button></div>
+
+<p style="font-size:13px">Оплата списывается Hyperliquid с Perps balance. Подписывать должен основной кошелёк аккаунта.</p>
+<small style="color:var(--muted)">Лог</small>
+<pre id="log">Готово. Нажми «Подключить MetaMask».</pre>
+</main>
+
+<script type="module">
+const EXPECTED = "0xD8A73dFF235633089AAB07f124b43a50205b57fC";
+const PRICE = 0.0005;
+let mm = null;
+let signer = null;
+let sdk = null;
+
+const el = id => document.getElementById(id);
+const log = v => el("log").textContent = typeof v === "string" ? v : JSON.stringify(v,null,2);
+
+function findMetaMask(){
+  const eth = window.ethereum;
+  if (!eth) return null;
+  if (Array.isArray(eth.providers)) {
+    return eth.providers.find(p => p && p.isMetaMask && !p.isRabby) || null;
+  }
+  if (eth.isMetaMask && !eth.isRabby) return eth;
+  return null;
+}
+
+async function loadSdk(){
+  if (sdk) return sdk;
+  log("Загружаю библиотеки…");
+  const hl = await import("https://esm.sh/@nktkas/hyperliquid@0.33.2");
+  const ethers = await import("https://esm.sh/ethers@6.15.0");
+  sdk = {...hl, ...ethers};
+  return sdk;
+}
+
+async function connect(){
+  try{
+    mm = findMetaMask();
+    if(!mm) throw new Error("MetaMask не найден. Убедись, что расширение MetaMask установлено и включено для этого сайта.");
+
+    const accounts = await mm.request({method:"eth_requestAccounts"});
+    if(!accounts || !accounts.length) throw new Error("MetaMask не вернул аккаунт.");
+
+    const address = accounts[0];
+    el("addr").textContent = address;
+
+    if(address.toLowerCase() !== EXPECTED.toLowerCase()){
+      el("addr").className = "bad";
+      el("reserve").disabled = true;
+      throw new Error("Подключён не тот адрес. Нужен " + EXPECTED);
+    }
+
+    const {BrowserProvider} = await loadSdk();
+    const provider = new BrowserProvider(mm);
+    signer = await provider.getSigner();
+
+    el("addr").className = "ok";
+    el("reserve").disabled = false;
+    log("MetaMask подключён. Адрес совпадает. Оставь 1 request для теста.");
+  }catch(e){
+    log("Ошибка подключения:\n" + (e?.shortMessage || e?.message || String(e)));
+  }
+}
+
+async function checkLimit(){
+  try{
+    const r = await fetch("https://api.hyperliquid.xyz/info",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({type:"userRateLimit",user:EXPECTED})
+    });
+    const txt = await r.text();
+    if(!r.ok) throw new Error("HTTP " + r.status + ": " + txt);
+    const d = JSON.parse(txt);
+    el("limit").textContent = `${d.nRequestsUsed} / ${d.nRequestsCap}`;
+    log(d);
+  }catch(e){
+    log("Ошибка userRateLimit:\n" + (e?.message || String(e)));
+  }
+}
+
+async function reserve(){
+  try{
+    if(!signer) throw new Error("Сначала подключи MetaMask.");
+    const w = Math.max(1,Math.floor(Number(el("weight").value||1)));
+    if(w>1 && !confirm(`Купить ${w} requests?\nОриентировочно ${(w*PRICE).toFixed(4)} USDC`)) return;
+
+    const {HttpTransport, ExchangeClient} = await loadSdk();
+    const transport = new HttpTransport({isTestnet:false});
+    const exchange = new ExchangeClient({transport,wallet:signer});
+
+    log(`Ожидаю подпись MetaMask для reserveRequestWeight(${w})…`);
+    const result = await exchange.reserveRequestWeight({weight:w});
+    log(result);
+    setTimeout(checkLimit,1200);
+  }catch(e){
+    const parts=[e?.shortMessage,e?.message,e?.details,e?.cause?.message].filter(Boolean);
+    log("Ошибка reserveRequestWeight:\n"+(parts.join("\n")||String(e)));
+  }
+}
+
+function updateCost(){
+  const w=Math.max(1,Math.floor(Number(el("weight").value||1)));
+  el("weight").value=String(w);
+  el("cost").textContent=(w*PRICE).toFixed(4)+" USDC";
+}
+
+el("connect").addEventListener("click",connect);
+el("check").addEventListener("click",checkLimit);
+el("reserve").addEventListener("click",reserve);
+el("weight").addEventListener("input",updateCost);
+updateCost();
+</script>
+</body>
+</html>
